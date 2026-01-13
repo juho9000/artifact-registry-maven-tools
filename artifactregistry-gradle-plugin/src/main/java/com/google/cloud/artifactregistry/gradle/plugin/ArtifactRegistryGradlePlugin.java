@@ -105,7 +105,6 @@ public class ArtifactRegistryGradlePlugin implements Plugin<Object> {
       CommandExecutor commandExecutor = new ProviderFactoryCommandExecutor(providerFactory);
 
       GoogleCredentials credentials = (GoogleCredentials)credentialProvider.getCredential(commandExecutor);
-      credentials.refreshIfExpired();
       AccessToken accessToken = credentials.getAccessToken();
       String token = accessToken.getTokenValue();
       crd = new ArtifactRegistryPasswordCredentials("oauth2accesstoken", token, commandExecutor);

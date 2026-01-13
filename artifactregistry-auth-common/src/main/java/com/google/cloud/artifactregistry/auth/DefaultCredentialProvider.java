@@ -40,6 +40,9 @@ public final class DefaultCredentialProvider implements CredentialProvider {
     return defaultInstance;
   }
 
+  // Rate limiting for refresh calls. Note: This only guards calls through getCredential().
+  // HttpCredentialsAdapter bypasses this by calling refreshIfExpired() directly on credentials.
+  // GcloudCredentials has its own rate limiting to handle that case.
   public static long LAST_REFRESH_TIME_MS = 0;
   public static final long REFESH_INTERVAL_MS = Duration.ofSeconds(10).toMillis();
 

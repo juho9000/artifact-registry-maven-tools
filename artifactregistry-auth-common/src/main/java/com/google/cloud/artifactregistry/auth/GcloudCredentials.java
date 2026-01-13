@@ -41,6 +41,23 @@ public class GcloudCredentials extends GoogleCredentials {
   private static final String KEY_ACCESS_TOKEN = "access_token";
   private static final String KEY_TOKEN_EXPIRY = "token_expiry";
 
+  // Rate limiting for refresh calls to avoid excessive gcloud invocations.
+  // This is necessary because HttpCredentialsAdapter calls refreshIfExpired() on every
+  // HTTP request, bypassing the rate limiting in DefaultCredentialProvider.
+  // With per-lookup wagon instantiation, builds with many artifacts could trigger
+  // a ton of gcloud CLI calls without this protection.
+  static final long MIN_REFRESH_INTERVAL_MS = Duration.ofSeconds(15).toMillis();
+  static final long MIN_TOKEN_LIFETIME_MS = Duration.ofSeconds(60).toMillis();
+  private static final Object refreshLock = new Object();
+  private static long lastRefreshTimeMs = 0;
+
+  // Visible for testing
+  static void resetRateLimitingState() {
+    synchronized (refreshLock) {
+      lastRefreshTimeMs = 0;
+    }
+  }
+
   private final CommandExecutor commandExecutor;
 
 
@@ -67,10 +84,34 @@ public class GcloudCredentials extends GoogleCredentials {
   }
 
   // This is called if the token expires, from the calls to refreshIfExpired()
+  // Rate limited to avoid excessive gcloud invocations during builds with many artifacts.
   @Override
   public AccessToken refreshAccessToken() throws IOException {
-    LOGGER.info("Refreshing gcloud credentials...");
-    return validateAccessToken(getGcloudAccessToken(this.commandExecutor));
+    synchronized (refreshLock) {
+      long now = Instant.now().toEpochMilli();
+
+      // Check if we refreshed recently
+      if ((now - lastRefreshTimeMs) < MIN_REFRESH_INTERVAL_MS) {
+        AccessToken currentToken = getAccessToken();
+        if (currentToken != null) {
+          // Only return cached token if it has enough lifetime remaining
+          Date expiry = currentToken.getExpirationTime();
+          if (expiry != null) {
+            long timeUntilExpiry = expiry.getTime() - now;
+            if (timeUntilExpiry > MIN_TOKEN_LIFETIME_MS) {
+              LOGGER.debug("Skipping refresh, token still valid for {}ms", timeUntilExpiry);
+              return currentToken;
+            }
+          }
+          // Token has no expiry or is expiring very soon, allow refresh even within rate limit
+        }
+      }
+
+      LOGGER.info("Refreshing gcloud credentials...");
+      AccessToken newToken = validateAccessToken(getGcloudAccessToken(this.commandExecutor));
+      lastRefreshTimeMs = now;
+      return newToken;
+    }
   }
 
   // Checks that the token is valid, throws IOException if it is expired.
@@ -80,7 +121,7 @@ public class GcloudCredentials extends GoogleCredentials {
   // login.
   private static AccessToken validateAccessToken(AccessToken token) throws IOException {
       Date expiry = token.getExpirationTime();
-      if (expiry.before(new Date())) {
+      if (expiry != null && expiry.before(new Date())) {
         throw new IOException("AccessToken is expired - maybe run `gcloud auth login`");
       }
       return token;
